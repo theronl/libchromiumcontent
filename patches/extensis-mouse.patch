@@ -12,10 +12,10 @@
  #include "base/auto_reset.h"
  #include "base/command_line.h"
  #include "base/files/file_util.h"
-@@ -78,6 +83,12 @@
+@@ -74,6 +79,12 @@
+ #include "ui/wm/public/drag_drop_delegate.h"
  
  namespace content {
- 
 +// BEGIN EXTENSIS
 +
 +HRESULT DragFilesToDesktop(HWND window, std::vector<base::string16> filenames);
@@ -25,7 +25,7 @@
  WebContentsView* CreateWebContentsView(
      WebContentsImpl* web_contents,
      WebContentsViewDelegate* delegate,
-@@ -288,6 +299,50 @@
+@@ -279,6 +290,50 @@
                       WebContentsImpl* web_contents) {
    provider->MarkOriginatedFromRenderer();
  #if defined(OS_WIN)
@@ -76,7 +76,7 @@
    // Put download before file contents to prefer the download of a image over
    // its thumbnail link.
    if (!drop_data.download_metadata.empty())
-@@ -1296,4 +1351,303 @@
+@@ -1161,4 +1216,303 @@
  }
  #endif
  
@@ -382,7 +382,7 @@
  }  // namespace content
 --- a/content/browser/web_contents/web_drag_source_mac.mm
 +++ b/content/browser/web_contents/web_drag_source_mac.mm
-@@ -455,8 +455,25 @@
+@@ -451,8 +451,25 @@
  
    // Plain text.
    if (!dropData_->text.string().empty()) {
