@@ -1,0 +1,412 @@
+--- a/content/browser/web_contents/web_contents_view_aura.cc
++++ b/content/browser/web_contents/web_contents_view_aura.cc
+@@ -7,6 +7,11 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include <windows.h>
++#include <string>
++#include <shlobj.h>
++#include "ObjIdl.h"
++
+ #include "base/auto_reset.h"
+ #include "base/command_line.h"
+ #include "base/files/file_util.h"
+@@ -78,6 +83,12 @@
+ 
+ namespace content {
+ 
++// BEGIN EXTENSIS
++
++HRESULT DragFilesToDesktop(HWND window, std::vector<base::string16> filenames);
++
++// END EXTENSIS
++
+ WebContentsView* CreateWebContentsView(
+     WebContentsImpl* web_contents,
+     WebContentsViewDelegate* delegate,
+@@ -288,6 +299,50 @@
+                      WebContentsImpl* web_contents) {
+   provider->MarkOriginatedFromRenderer();
+ #if defined(OS_WIN)
++
++  // BEGIN EXTENSIS
++  // Note this is experimental. This will start a drag & drop and exit without
++  // calling any subsequent code. We'll want to see if any of that is needed.
++  if (!drop_data.text.string().empty()) {
++    const base::string16& tmp = drop_data.text.string();
++    const base::char16 kExtensisFilenamesToken[] = { 'e', 'x', 't', 'e', 'n', 's',
++      'i', 's', '-', 'f', 'i', 'l', 'e', 'n', 'a', 'm', 'e', 's', '-', 't', 'y',
++      'p', 'e', ':', 0 };
++    const base::char16 kFilenamesDelimiterToken[] = { '|', '\n', '|', 0 };
++    std::vector<base::string16> filenames;
++
++    if (tmp.find(kExtensisFilenamesToken) == 0) {
++      size_t pos = base::string16(kExtensisFilenamesToken).length();
++      while (pos != base::string16::npos) {
++        base::string16 filename;
++        size_t pos2 = tmp.find(kFilenamesDelimiterToken, pos);
++
++        if (pos2 == base::string16::npos) {
++          filename = tmp.substr(pos);
++          filenames.push_back(filename);
++          pos = pos2;
++        } else {
++          filename = tmp.substr(pos, pos2 - pos);
++          filenames.push_back(filename);
++          pos = pos2 + base::string16(kFilenamesDelimiterToken).length();
++        }
++      }
++
++      HWND native_window = web_contents->GetView()->GetNativeView()->GetHost()->GetAcceleratedWidget();
++      HRESULT hr = DragFilesToDesktop(native_window, filenames);
++
++      if(SUCCEEDED(hr)) {
++        // Abort default d&d behavior, it was already handled.
++        return;
++      } else {
++        // Continue with default d&d behavior. This will drag thumbnail images
++        // for selected items. TODO We may wish to display an error message
++        // instead.
++      }
++    }
++  }
++  // END EXTENSIS
++
+   // Put download before file contents to prefer the download of a image over
+   // its thumbnail link.
+   if (!drop_data.download_metadata.empty())
+@@ -1296,4 +1351,303 @@
+ }
+ #endif
+ 
++// BEGIN EXTENSIS
++
++class CExtDropSource : public IDropSource
++{
++public:
++  // *** IUnknown ***
++  STDMETHODIMP QueryInterface(REFIID riid, void **ppv);
++  STDMETHODIMP_(ULONG) AddRef();
++  STDMETHODIMP_(ULONG) Release();
++
++  // *** IDropSource ***
++  STDMETHODIMP QueryContinueDrag(BOOL fEscapePressed, DWORD grfKeyState);
++  STDMETHODIMP GiveFeedback(DWORD dwEffect);
++
++  CExtDropSource() : m_refCount(1) { }
++private:
++  LONG m_refCount;
++};
++
++HRESULT CExtDropSource::QueryInterface(REFIID riid, void **ppv)
++{
++  IUnknown *punk = NULL;
++  if (riid == IID_IUnknown) {
++    punk = static_cast<IUnknown*>(this);
++  } else if (riid == IID_IDropSource) {
++    punk = static_cast<IDropSource*>(this);
++  }
++
++  *ppv = punk;
++  if (punk) {
++    punk->AddRef();
++    return S_OK;
++  } else {
++    return E_NOINTERFACE;
++  }
++}
++
++ULONG CExtDropSource::AddRef(void) {
++  // increment object reference count
++  return InterlockedIncrement(&m_refCount);
++}
++
++ULONG CExtDropSource::Release(void) {
++  // decrement object reference count
++  LONG count = InterlockedDecrement(&m_refCount);
++
++  if(count == 0) {
++    delete this;
++    return 0;
++  }
++  else {
++    return count;
++  }
++}
++
++HRESULT CExtDropSource::QueryContinueDrag(
++  BOOL fEscapePressed, DWORD grfKeyState)
++{
++  if (fEscapePressed) return DRAGDROP_S_CANCEL;
++
++  if (!(grfKeyState & (MK_LBUTTON | MK_RBUTTON))) {
++    return DRAGDROP_S_DROP;
++  }
++
++  return S_OK;
++}
++
++HRESULT CExtDropSource::GiveFeedback(DWORD dwEffect)
++{
++  return DRAGDROP_S_USEDEFAULTCURSORS;
++}
++
++// Implement IDataObject for drag & drop of files to desktop and applications
++class CExtDataObject : public IDataObject {
++public:
++  // IUnknown members
++  STDMETHODIMP      QueryInterface (REFIID iid, void ** ppvObject);
++  STDMETHODIMP_(ULONG)  AddRef (void);
++  STDMETHODIMP_(ULONG)  Release (void);
++
++  // IDataObject members
++  STDMETHODIMP GetData        (FORMATETC *formatEtc,  STGMEDIUM *pMedium);
++  STDMETHODIMP GetDataHere      (FORMATETC *formatEtc,  STGMEDIUM *pMedium);
++  STDMETHODIMP QueryGetData     (FORMATETC *formatEtc);
++  STDMETHODIMP GetCanonicalFormatEtc  (FORMATETC *formatEtc,  FORMATETC *pFormatEtcOut);
++  STDMETHODIMP SetData        (FORMATETC *formatEtc,  STGMEDIUM *pMedium,  BOOL fRelease);
++  STDMETHODIMP EnumFormatEtc      (DWORD      dwDirection, IEnumFORMATETC **ppEnumFormatEtc);
++  STDMETHODIMP DAdvise        (FORMATETC *formatEtc,  DWORD advf, IAdviseSink *pAdvSink, DWORD *pdwConnection);
++  STDMETHODIMP DUnadvise        (DWORD      dwConnection);
++  STDMETHODIMP EnumDAdvise      (IEnumSTATDATA **ppEnumAdvise);
++
++  // Constructor / Destructor
++  CExtDataObject(std::vector<base::string16> paths);
++  ~CExtDataObject();
++
++private:
++
++  int LookupFormatEtc(FORMATETC *pFormatEtc);
++  HGLOBAL CreateDropfiles(std::vector<base::string16>& paths);
++
++  std::vector<base::string16> m_paths;
++  LONG     m_refCount;
++  FORMATETC  m_formatEtc;
++};
++
++CExtDataObject::CExtDataObject(std::vector<base::string16> paths) {
++
++  m_paths = paths;
++
++  // reference count must ALWAYS start at 1
++  m_refCount    = 1;
++
++  m_formatEtc.cfFormat = CF_HDROP;
++  m_formatEtc.dwAspect = DVASPECT_CONTENT;
++  m_formatEtc.lindex = -1;
++  m_formatEtc.ptd = NULL;
++  m_formatEtc.tymed = TYMED_HGLOBAL;
++}
++
++CExtDataObject::~CExtDataObject() {
++
++}
++
++ULONG CExtDataObject::AddRef(void) {
++  // increment object reference count
++  return InterlockedIncrement(&m_refCount);
++}
++
++ULONG CExtDataObject::Release(void) {
++  // decrement object reference count
++  LONG count = InterlockedDecrement(&m_refCount);
++
++  if(count == 0) {
++    delete this;
++    return 0;
++  }
++  else {
++    return count;
++  }
++}
++
++HRESULT CExtDataObject::QueryInterface(REFIID iid, void **ppvObject) {
++  // check to see what interface has been requested
++  if(iid == IID_IDataObject || iid == IID_IUnknown) {
++    AddRef();
++    *ppvObject = this;
++    return S_OK;
++  } else {
++    *ppvObject = 0;
++    return E_NOINTERFACE;
++  }
++}
++
++HRESULT CExtDataObject::QueryGetData(FORMATETC *formatEtc) {
++  return (LookupFormatEtc(formatEtc) == -1) ? DV_E_FORMATETC : S_OK;
++}
++
++int CExtDataObject::LookupFormatEtc(FORMATETC *formatEtc) {
++  if((m_formatEtc.tymed    &  formatEtc->tymed)   &&
++    m_formatEtc.cfFormat == formatEtc->cfFormat &&
++    m_formatEtc.dwAspect == formatEtc->dwAspect) {
++    return 0;
++  }
++
++  // error, format not found
++  return -1;
++}
++
++HRESULT CExtDataObject::GetData(FORMATETC *formatEtc, STGMEDIUM *stgMedium) {
++  std::vector<base::string16> pathsThatExist;
++
++  // try to match the requested FORMATETC with one of our supported formats
++  if(LookupFormatEtc(formatEtc) == -1) {
++    return DV_E_FORMATETC;
++  }
++
++  stgMedium->tymed = m_formatEtc.tymed;
++  stgMedium->pUnkForRelease = 0;
++
++  switch(m_formatEtc.tymed) {
++  case TYMED_HGLOBAL:
++
++    // Create DROPFILES just in time, using only files that actually exist
++    for(std::vector<base::string16>::iterator i = m_paths.begin(); i != m_paths.end(); i++) {
++      if(INVALID_FILE_ATTRIBUTES != GetFileAttributes(i->c_str())) {
++        pathsThatExist.push_back(*i);
++      }
++    }
++
++    stgMedium->hGlobal = CreateDropfiles(pathsThatExist);
++    break;
++
++  default:
++    return DV_E_FORMATETC;
++  }
++
++  return S_OK;
++}
++
++HRESULT CExtDataObject::GetDataHere(FORMATETC *pFormatEtc, STGMEDIUM *pMedium) {
++  // GetDataHere is only required for IStream and IStorage mediums
++  return DATA_E_FORMATETC;
++}
++
++HRESULT CExtDataObject::EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC **ppEnumFormatEtc) {
++  if(dwDirection == DATADIR_GET) {
++    return SHCreateStdEnumFmtEtc(1, &m_formatEtc, ppEnumFormatEtc);
++  } else {
++    // the direction specified is not support for drag+drop
++    return E_NOTIMPL;
++  }
++}
++
++HRESULT CExtDataObject::DAdvise (FORMATETC *pFormatEtc, DWORD advf, IAdviseSink *pAdvSink, DWORD *pdwConnection) {
++  return OLE_E_ADVISENOTSUPPORTED;
++}
++
++HRESULT CExtDataObject::DUnadvise(DWORD dwConnection) {
++  return OLE_E_ADVISENOTSUPPORTED;
++}
++
++HRESULT CExtDataObject::EnumDAdvise(IEnumSTATDATA **ppEnumAdvise) {
++  return OLE_E_ADVISENOTSUPPORTED;
++}
++
++HRESULT CExtDataObject::GetCanonicalFormatEtc(FORMATETC *pFormatEct, FORMATETC *formatEtcOut) {
++  // Apparently we have to set this field to NULL even though we don't do anything else
++  formatEtcOut->ptd = NULL;
++  return E_NOTIMPL;
++}
++
++HRESULT CExtDataObject::SetData (FORMATETC *pFormatEtc, STGMEDIUM *pMedium,  BOOL fRelease) {
++  return E_NOTIMPL;
++}
++
++HGLOBAL CExtDataObject::CreateDropfiles(std::vector<base::string16>& paths) {
++
++  if (paths.empty()) {
++    return NULL;
++  }
++
++  // The DROPFILES struct will be followed by a double-null-terminated list of strings containing file paths
++  // Determine the memory needed to hold the struct plus the files
++  size_t bufSize = sizeof(DROPFILES);
++  for(std::vector<base::string16>::iterator i = paths.begin(); i != paths.end(); i++) {
++    bufSize += (sizeof(WCHAR) * (i->size() + 1));
++  }
++
++  HGLOBAL hMem = GlobalAlloc(GHND, bufSize + sizeof(WCHAR));
++  if (!hMem) {
++    return NULL;
++  }
++
++  DROPFILES *dfiles = (DROPFILES*) GlobalLock(hMem);
++  if (!dfiles) {
++    GlobalFree(hMem);
++    return NULL;
++  }
++
++  dfiles->pFiles = sizeof(DROPFILES);
++  GetCursorPos(&(dfiles->pt));
++  dfiles->fNC = TRUE;
++  dfiles->fWide = TRUE;
++
++  // Copy each path to the end of the structure
++  char *pathBuffer = (char*) &dfiles[1];
++  for(std::vector<base::string16>::iterator i = paths.begin(); i != paths.end(); i++) {
++    size_t len = sizeof(WCHAR) * (i->length() + 1);
++    memcpy(pathBuffer, i->c_str(), len);
++    pathBuffer += len;
++  }
++
++  GlobalUnlock(hMem);
++
++  return hMem;
++}
++
++HRESULT DragFilesToDesktop(HWND window, std::vector<base::string16> paths) {
++  HRESULT hr = S_OK;
++  IDataObject *dataObject = new CExtDataObject(paths);
++
++  if(dataObject) {
++    IDropSource *dropSource = new CExtDropSource();
++    if(dropSource) {
++      DWORD dwEffect = 0;
++      DoDragDrop(dataObject, dropSource, DROPEFFECT_COPY, &dwEffect);
++      dropSource->Release();
++    } else {
++      hr = E_OUTOFMEMORY;
++    }
++
++    dataObject->Release();
++  }
++
++  return hr;
++}
++
++// END EXTENSIS
++
+ }  // namespace content
+--- a/content/browser/web_contents/web_drag_source_mac.mm
++++ b/content/browser/web_contents/web_drag_source_mac.mm
+@@ -455,8 +455,25 @@
+ 
+   // Plain text.
+   if (!dropData_->text.string().empty()) {
+-    [pasteboard_ addTypes:@[ NSStringPboardType ]
+-                    owner:contentsView_];
++    NSString *tmp = SysUTF16ToNSString(dropData_->text.string());
++
++    NSString *kExtensisFilenamesToken = @"extensis-filenames-type:";
++    NSString *kFilenamesDelimiterToken = @"|\n|";
++
++    // If this is a special Extensis kind of text, parse it,
++    // and set a NSFilenamesPboardType pasteboard property.
++    NSRange filenameTokenLoc = [tmp rangeOfString:kExtensisFilenamesToken];
++    if (filenameTokenLoc.location != NSNotFound) {
++      NSString *filenamesStr = [tmp substringFromIndex:filenameTokenLoc.location + filenameTokenLoc.length];
++      NSArray *filenames = [filenamesStr componentsSeparatedByString:kFilenamesDelimiterToken];
++      if ([filenames count] > 0) {
++        dragOperationMask_ &= ~NSDragOperationMove;
++        [pasteboard_ setPropertyList:filenames forType:NSFilenamesPboardType];
++      }
++    } else {
++      [pasteboard_ addTypes:@[ NSStringPboardType ]
++                      owner:contentsView_];
++    }
+   }
+ 
+   if (!dropData_->custom_data.empty()) {
